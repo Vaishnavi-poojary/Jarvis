@@ -1,4 +1,5 @@
 import time
+import argparse
 
 from voice.listener import listen
 from voice.speaker import speak
@@ -37,5 +38,22 @@ def run_jarvis():
             time.sleep(0.5)
 
 
+def run_ui():
+    from gui.ui import launch_ui
+
+    return launch_ui()
+
+
 if __name__ == "__main__":
-    run_jarvis()
+    parser = argparse.ArgumentParser(description="JARVIS local assistant")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="run the original voice loop instead of the PyQt UI skeleton",
+    )
+    args = parser.parse_args()
+
+    if args.cli:
+        run_jarvis()
+    else:
+        raise SystemExit(run_ui())
