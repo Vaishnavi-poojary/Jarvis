@@ -36,6 +36,12 @@ YELLOW = "#ffd23f"
 RED = "#ff2d3a"
 BG = "#02070d"
 TEXT = "#b9f8ff"
+VOICE_STOP_COMMANDS = {"stop listening", "go offline", "sleep jarvis"}
+
+
+def _is_voice_stop_command(command: str) -> bool:
+    text = " ".join(command.lower().strip().split())
+    return text in VOICE_STOP_COMMANDS
 
 
 class ReactorState(Enum):
@@ -287,25 +293,50 @@ class JarvisWorker(QThread):
                         "response_time": self._elapsed(started_at),
                         "error": "No command received",
                         "active_model": "idle",
+                        "voice_retry": self.use_voice,
                     }
                 )
                 return
 
-            from ai.ai_engine import get_ai_response
-            from ai.router import choose_model
+            if self.use_voice and _is_voice_stop_command(command):
+                self.result_ready.emit(
+                    {
+                        "response": "Voice Mode: Off",
+                        "last_action": "continuous voice stopped",
+                        "current_task": "Idle",
+                        "response_time": self._elapsed(started_at),
+                        "error": "None",
+                        "active_model": "idle",
+                        "voice_stop": True,
+                    }
+                )
+                return
+
+            from ai.ai_engine import get_active_model_label, get_ai_response
+            from ai.quick_responses import get_quick_response, make_quick_decision
             from brain.planner import plan
             from executor.executor import execute_plan
             from memory.store import get_context_summary, remember_event
 
-            active_model = choose_model(command)
-            decision = plan(command)
-
-            if decision.route in {"action", "ask", "multi"}:
-                response = execute_plan(decision)
-            elif decision.response:
-                response = decision.response
+            quick_response = get_quick_response(command)
+            if quick_response:
+                active_model = "local quick response"
+                decision = make_quick_decision(quick_response, command)
+                response = quick_response
             else:
-                response = get_ai_response(command, context=get_context_summary())
+                active_model = get_active_model_label(command)
+                decision = plan(command)
+
+                if decision.route in {"action", "ask", "multi"}:
+                    response = execute_plan(decision)
+                elif decision.response:
+                    response = decision.response
+                else:
+                    response = get_ai_response(command, context=get_context_summary())
+                    active_model = get_active_model_label(command)
+
+                if decision.action == "remember_state" and decision.target in {"api", "ollama"}:
+                    active_model = get_active_model_label(command)
 
             remember_event(command, decision, response)
 
@@ -409,10 +440,12 @@ class BootWindow(QFrame):
     finished = pyqtSignal()
 
     BOOT_STEPS = [
-        "Initializing systems",
-        "Loading memory",
-        "Voice module online",
-        "AI core online",
+        "Initializing system...",
+        "Loading memory...",
+        "Voice module online...",
+        "AI core online...",
+        "Security protocols active...",
+        "Systems ready...",
     ]
 
     def __init__(self):
@@ -420,7 +453,7 @@ class BootWindow(QFrame):
         self.step_index = 0
         self.setObjectName("bootWindow")
         self.setWindowTitle("J.A.R.V.I.S Boot")
-        self.resize(720, 420)
+        self.resize(760, 520)
         self.setStyleSheet(self._style())
 
         layout = QVBoxLayout(self)
@@ -431,19 +464,24 @@ class BootWindow(QFrame):
         title.setObjectName("bootTitle")
         self.status_label = QLabel(self.BOOT_STEPS[0])
         self.status_label.setObjectName("bootStatus")
+        self.reactor = ArcReactorWidget()
+        self.reactor.setMinimumSize(170, 170)
+        self.reactor.setMaximumSize(210, 210)
+        self.reactor.set_state(ReactorState.LISTENING)
         self.log_label = QLabel("")
         self.log_label.setObjectName("bootLog")
         self.log_label.setWordWrap(True)
 
         layout.addStretch(1)
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.reactor, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.log_label)
         layout.addStretch(1)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._advance)
-        self.timer.start(650)
+        self.timer.start(480)
 
     def _advance(self):
         completed = self.BOOT_STEPS[: self.step_index + 1]
@@ -455,7 +493,8 @@ class BootWindow(QFrame):
             return
 
         self.timer.stop()
-        QTimer.singleShot(450, self.finished.emit)
+        self.reactor.set_state(ReactorState.SPEAKING)
+        QTimer.singleShot(650, self.finished.emit)
 
     def _style(self):
         return f"""
@@ -491,6 +530,7 @@ class JarvisWindow(QMainWindow):
         super().__init__()
         self.started_at = time.monotonic()
         self.worker = None
+        self.continuous_voice_active = False
         self.nav_buttons = {}
         self.page_indexes = {}
         self.runtime_values = {}
@@ -513,6 +553,7 @@ class JarvisWindow(QMainWindow):
         outer.addWidget(self._build_bottom_bar())
 
         self.setStyleSheet(self._style())
+        self._refresh_provider_labels()
         self._seed_clock()
 
         self.clock_timer = QTimer(self)
@@ -529,17 +570,17 @@ class JarvisWindow(QMainWindow):
         title.setObjectName("brand")
         status = QLabel("ONLINE")
         status.setObjectName("online")
-        model = QLabel("ollama:mistral")
-        model.setObjectName("modelPill")
-        api = QLabel("API // ACTIVE")
-        api.setObjectName("apiStatus")
+        self.model_pill_label = QLabel("ollama:phi3")
+        self.model_pill_label.setObjectName("modelPill")
+        self.api_status_label = QLabel("OLLAMA // ACTIVE")
+        self.api_status_label.setObjectName("apiStatus")
 
         layout.addWidget(title)
         layout.addStretch(1)
         layout.addWidget(status)
-        layout.addWidget(model)
+        layout.addWidget(self.model_pill_label)
         layout.addSpacing(16)
-        layout.addWidget(api)
+        layout.addWidget(self.api_status_label)
         layout.addSpacing(30)
         layout.addWidget(self.clock_label)
         self.clock_label.setObjectName("clock")
@@ -627,14 +668,7 @@ class JarvisWindow(QMainWindow):
             ),
             (
                 "Model Toggle",
-                self._build_placeholder_page(
-                    "Model Toggle",
-                    [
-                        ("ACTIVE ROUTER", "Automatic model selection"),
-                        ("FAST MODEL", "phi3"),
-                        ("DEEP MODEL", "llama3"),
-                    ],
-                ),
+                self._build_model_toggle_page(),
             ),
             (
                 "Settings",
@@ -668,6 +702,85 @@ class JarvisWindow(QMainWindow):
         layout.addWidget(self._build_chat_area(), 4)
         layout.addWidget(self._build_input_controls())
         return panel
+
+    def _build_model_toggle_page(self):
+        from memory.store import get_llm_provider
+
+        panel = QFrame()
+        panel.setObjectName("centerPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 24, 6, 18)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._section_label("// model toggle"))
+
+        header = QFrame()
+        header.setObjectName("pageHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(22, 18, 22, 18)
+        header_layout.setSpacing(6)
+
+        title_label = QLabel("MODEL TOGGLE")
+        title_label.setObjectName("pageTitle")
+        self.provider_status_label = QLabel("")
+        self.provider_status_label.setObjectName("pageSubtitle")
+
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(self.provider_status_label)
+        layout.addWidget(header)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        self.ollama_provider_button = QPushButton("OLLAMA")
+        self.api_provider_button = QPushButton("API")
+        self.ollama_provider_button.setObjectName("providerButton")
+        self.api_provider_button.setObjectName("providerButton")
+        self.ollama_provider_button.clicked.connect(lambda: self._set_llm_provider("ollama"))
+        self.api_provider_button.clicked.connect(lambda: self._set_llm_provider("api"))
+
+        self.provider_card_value = QLabel(get_llm_provider().upper())
+        self.provider_card_value.setObjectName("moduleValue")
+        provider_card = self._module_card("CURRENT PROVIDER", get_llm_provider().upper())
+        self.provider_card_value = provider_card.findChild(QLabel, "moduleValue")
+        grid.addWidget(provider_card, 0, 0)
+        grid.addWidget(self._module_card("ACTIVE ROUTER", "Automatic model selection"), 0, 1)
+        grid.addWidget(self.ollama_provider_button, 1, 0)
+        grid.addWidget(self.api_provider_button, 1, 1)
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        return panel
+
+    def _set_llm_provider(self, provider):
+        from memory.store import set_llm_provider
+
+        selected = set_llm_provider(provider)
+        self._refresh_provider_labels()
+        self._append_chat("J.A.R.V.I.S", f"{selected.upper()} mode enabled.", assistant=True)
+
+    def _refresh_provider_labels(self):
+        from ai.ai_engine import get_active_model_label
+        from memory.store import get_llm_provider
+
+        provider = get_llm_provider()
+        provider_name = provider.upper()
+        if hasattr(self, "model_pill_label"):
+            self.model_pill_label.setText(get_active_model_label())
+        if hasattr(self, "api_status_label"):
+            self.api_status_label.setText(f"{provider_name} // ACTIVE")
+        if hasattr(self, "provider_status_label"):
+            self.provider_status_label.setText(f"Current provider: {provider_name}")
+        if hasattr(self, "provider_card_value") and self.provider_card_value:
+            self.provider_card_value.setText(provider_name)
+
+        for button, button_provider in (
+            (getattr(self, "ollama_provider_button", None), "ollama"),
+            (getattr(self, "api_provider_button", None), "api"),
+        ):
+            if button:
+                button.setProperty("active", provider == button_provider)
+                button.style().unpolish(button)
+                button.style().polish(button)
 
     def _build_placeholder_page(self, title, cards):
         panel = QFrame()
@@ -925,18 +1038,28 @@ class JarvisWindow(QMainWindow):
         self._start_worker(command=command)
 
     def _send_voice_command(self):
+        if self.continuous_voice_active:
+            self._stop_continuous_voice()
+            return
+
         if self._worker_is_running():
             return
 
-        self._set_runtime("voice_mode", "Listening...")
-        self._set_runtime("current_task", "Capturing voice input")
+        self.continuous_voice_active = True
+        self._set_runtime("voice_mode", "Voice Mode: Active")
+        self._set_runtime("current_task", "Listening...")
+        self.voice_button.setText("VOICE ON")
         self._start_worker(use_voice=True)
 
     def _start_worker(self, command="", use_voice=False):
         self._set_busy(True)
         self._set_runtime("errors", "None")
         self._set_runtime("last_action", "Listening" if use_voice else "Processing")
-        self._set_runtime("current_task", "Capturing voice input" if use_voice else command)
+        if use_voice and self.continuous_voice_active:
+            self._set_runtime("voice_mode", "Voice Mode: Active")
+            self._set_runtime("current_task", "Listening...")
+        else:
+            self._set_runtime("current_task", "Capturing voice input" if use_voice else command)
         self._set_runtime("active_model", "resolving...")
         self._set_runtime("response_time", "--")
         self.reactor.set_state(ReactorState.LISTENING if use_voice else ReactorState.THINKING)
@@ -949,11 +1072,36 @@ class JarvisWindow(QMainWindow):
 
     def _handle_voice_command(self, command):
         self._append_chat("You", command, assistant=False)
-        self._set_runtime("voice_mode", "Processing speech")
+        self._set_runtime("voice_mode", "Processing...")
         self._set_runtime("current_task", command)
         self.reactor.set_state(ReactorState.THINKING)
 
     def _handle_worker_finished(self, result):
+        if result.get("voice_stop"):
+            self._finish_continuous_voice(result)
+            return
+
+        if result.get("voice_retry") and self.continuous_voice_active:
+            self.worker = None
+            self._set_busy(False)
+            self._set_runtime("last_action", "Listening")
+            self._set_runtime("voice_mode", "Voice Mode: Active")
+            self._set_runtime("current_task", "Listening...")
+            self._set_runtime("errors", "None")
+            self.reactor.set_state(ReactorState.LISTENING)
+            QTimer.singleShot(250, self._restart_continuous_voice)
+            return
+
+        if result.get("voice_retry") and not self.continuous_voice_active:
+            self.worker = None
+            self._set_busy(False)
+            self._set_runtime("voice_mode", "Voice Mode: Off")
+            self._set_runtime("last_action", "Voice stopped")
+            self._set_runtime("current_task", "Idle")
+            self._set_runtime("errors", "None")
+            self.reactor.set_state(ReactorState.STOP)
+            return
+
         response = result.get("response") or "I do not have a response yet."
         self._append_chat("J.A.R.V.I.S", response, assistant=True)
         self._set_runtime("last_action", result.get("last_action", "Complete"))
@@ -961,17 +1109,25 @@ class JarvisWindow(QMainWindow):
         self._set_runtime("current_task", result.get("current_task", "Idle"))
         self._set_runtime("response_time", result.get("response_time", "--"))
         self._set_runtime("errors", result.get("error", "None") or "None")
-        self._set_runtime("voice_mode", "Ready (Indian Accent)")
+        self._set_runtime("voice_mode", "Voice Mode: Active" if self.continuous_voice_active else "Voice Mode: Off")
+        self._refresh_provider_labels()
 
         has_error = (result.get("error") or "None") != "None"
         if has_error:
             self.reactor.set_state(ReactorState.ERROR)
         else:
-            self.reactor.set_state(ReactorState.SPEAKING, auto_idle_ms=1400)
+            self.reactor.set_state(ReactorState.SPEAKING, auto_idle_ms=None if self.continuous_voice_active else 1400)
         self._set_busy(False)
         self.worker = None
+        if self.continuous_voice_active:
+            self._set_runtime("current_task", "Listening...")
+            QTimer.singleShot(900, self._restart_continuous_voice)
 
     def _stop_current_task(self):
+        if self.continuous_voice_active:
+            self._stop_continuous_voice()
+            return
+
         if self._worker_is_running():
             self._set_runtime("last_action", "Stop requested")
             self._set_runtime("current_task", "Waiting for backend call to finish")
@@ -984,6 +1140,41 @@ class JarvisWindow(QMainWindow):
         self._set_runtime("last_action", "Stopped")
         self._set_runtime("current_task", "Idle")
         self._set_runtime("errors", "None")
+        self.reactor.set_state(ReactorState.STOP)
+
+    def _restart_continuous_voice(self):
+        if not self.continuous_voice_active or self._worker_is_running():
+            return
+
+        self._set_runtime("voice_mode", "Voice Mode: Active")
+        self._set_runtime("last_action", "Listening")
+        self._set_runtime("current_task", "Listening...")
+        self.reactor.set_state(ReactorState.LISTENING)
+        self._start_worker(use_voice=True)
+
+    def _stop_continuous_voice(self):
+        self.continuous_voice_active = False
+        self.voice_button.setText("VOICE")
+        self._set_runtime("voice_mode", "Voice Mode: Off")
+        self._set_runtime("last_action", "Voice stopped")
+        self._set_runtime("current_task", "Idle")
+        self._set_runtime("errors", "None")
+        self.reactor.set_state(ReactorState.STOP)
+        if not self._worker_is_running():
+            self._set_busy(False)
+
+    def _finish_continuous_voice(self, result):
+        self.continuous_voice_active = False
+        self.worker = None
+        self._set_busy(False)
+        self.voice_button.setText("VOICE")
+        self._append_chat("J.A.R.V.I.S", result.get("response") or "Voice Mode: Off", assistant=True)
+        self._set_runtime("last_action", result.get("last_action", "continuous voice stopped"))
+        self._set_runtime("active_model", result.get("active_model", "idle"))
+        self._set_runtime("current_task", "Idle")
+        self._set_runtime("response_time", result.get("response_time", "--"))
+        self._set_runtime("errors", "None")
+        self._set_runtime("voice_mode", "Voice Mode: Off")
         self.reactor.set_state(ReactorState.STOP)
 
     def _append_chat(self, sender, body, assistant=False):
@@ -1002,7 +1193,7 @@ class JarvisWindow(QMainWindow):
 
     def _set_busy(self, busy):
         self.send_button.setEnabled(not busy)
-        self.voice_button.setEnabled(not busy)
+        self.voice_button.setEnabled(self.continuous_voice_active or not busy)
         self.text_button.setEnabled(not busy)
         self.command_input.setEnabled(not busy)
         self.stop_button.setEnabled(True)
@@ -1142,6 +1333,11 @@ class JarvisWindow(QMainWindow):
         }}
         #sendButton {{
             font-size: 17px;
+        }}
+        #providerButton[active="true"] {{
+            color: #e8fdff;
+            border-color: {GREEN};
+            background: rgba(0, 255, 136, 35);
         }}
         #sectionLabel {{
             padding: 8px 24px;

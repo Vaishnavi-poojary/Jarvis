@@ -12,6 +12,39 @@ def test_open_calculator():
     assert d.action == "open_app"
 
 
+def test_open_downloads_folder():
+    d = plan("open downloads")
+    assert d.route == "action"
+    assert d.action == "open_folder"
+    assert d.target == "downloads"
+
+
+def test_open_file_query():
+    d = plan("open resume")
+    assert d.route == "action"
+    assert d.intent == "open_file"
+    assert d.action == "open_file"
+    assert d.query == "resume"
+
+
+def test_open_notes_with_descriptor_is_file_not_notepad():
+    d = plan("open dbms notes")
+    assert d.action == "open_file"
+    assert d.query == "dbms notes"
+
+
+def test_open_notes_alone_still_opens_app():
+    d = plan("open notes")
+    assert d.action == "open_app"
+    assert d.target == "notepad"
+
+
+def test_open_website_still_wins_over_file():
+    d = plan("open youtube")
+    assert d.action == "open_site"
+    assert d.target == "youtube"
+
+
 def test_youtube_query():
     d = plan("i want to watch tmkoc in youtube")
     assert d.action == "search_youtube"
@@ -31,6 +64,42 @@ def test_search():
 def test_memory_preference():
     d = plan("remember that my favorite show is tmkoc")
     assert d.action == "remember_preference"
+
+
+def test_switch_to_api_mode_persists(monkeypatch):
+    memory_file = Path(__file__).with_name(".memory_provider_test.json")
+    if memory_file.exists():
+        memory_file.unlink()
+
+    monkeypatch.setattr(memory_store, "MEMORY_FILE", memory_file)
+
+    try:
+        d = plan("switch to api mode")
+        memory = memory_store.load_memory()
+        assert d.action == "remember_state"
+        assert d.target == "api"
+        assert memory["state"]["llm_provider"] == "api"
+    finally:
+        if memory_file.exists():
+            memory_file.unlink()
+
+
+def test_switch_to_ollama_mode_persists(monkeypatch):
+    memory_file = Path(__file__).with_name(".memory_provider_test.json")
+    if memory_file.exists():
+        memory_file.unlink()
+
+    monkeypatch.setattr(memory_store, "MEMORY_FILE", memory_file)
+
+    try:
+        d = plan("use ollama")
+        memory = memory_store.load_memory()
+        assert d.action == "remember_state"
+        assert d.target == "ollama"
+        assert memory["state"]["llm_provider"] == "ollama"
+    finally:
+        if memory_file.exists():
+            memory_file.unlink()
 
 
 def test_llm_fallback_trigger():

@@ -1,16 +1,25 @@
 from tools.system_tools import (
     open_notepad, close_notepad,
     open_calculator, close_calculator,
-    open_chrome, close_chrome
+    open_chrome, close_chrome,
+    open_path,
+    open_matching_file,
 )
 
 from tools.browser_tools import (
     search_google, search_youtube,
-    open_github, open_stackoverflow,open_youtube
+    open_github, open_stackoverflow, open_youtube,
+    play_youtube_first_result,
 )
 
 import os
 import re
+from pathlib import Path
+
+
+CUSTOM_FOLDER_ALIASES = {
+    "project_folder": Path.cwd(),
+}
 
 # 🔥 memory
 last_app = None
@@ -112,8 +121,12 @@ def execute_command(command: str):
         query = _strip_trailing_connectors(query)
 
         if query:
+            if _should_autoplay_youtube(command) and play_youtube_first_result(query):
+                return f"Playing {query} on YouTube"
             search_youtube(query)
-            return f"Playing {query} on YouTube"
+            if _should_autoplay_youtube(command):
+                return f"Opened YouTube results for {query}. Autoplay was not available."
+            return f"Searching YouTube for {query}"
         else:
             open_youtube()
             return "Opening YouTube"
@@ -163,9 +176,15 @@ def execute_plan(decision, allow_multi=True):
             open_youtube()
             last_app = "youtube"
             return "Opening YouTube"
+        if decision.intent == "play_media" and play_youtube_first_result(query):
+            last_app = "youtube"
+            return f"Playing {query} on YouTube"
+
         search_youtube(query)
         last_app = "youtube"
-        return f"Playing {query} on YouTube"
+        if decision.intent == "play_media":
+            return f"Opened YouTube results for {query}. Autoplay was not available."
+        return f"Searching YouTube for {query}"
 
     if action == "open_site":
         if target == "youtube":
@@ -181,6 +200,15 @@ def execute_plan(decision, allow_multi=True):
 
         last_app = target
         return f"Opening {target}"
+
+    if action == "open_folder":
+        folder_result = open_folder(target)
+        if folder_result.startswith("Opening "):
+            last_app = target
+        return folder_result
+
+    if action == "open_file":
+        return open_file(query or target)
 
     if action == "open_app":
         if target == "notepad":
@@ -248,3 +276,83 @@ def _strip_trailing_connectors(text):
     while words and words[-1] in {"on", "in", "at", "from"}:
         words.pop()
     return " ".join(words)
+
+
+def _should_autoplay_youtube(command: str) -> bool:
+    return any(word in command.lower().split() for word in {"play", "watch"})
+
+
+def open_folder(folder_name):
+    if not folder_name:
+        return "Which folder should I open?"
+
+    label = folder_name.replace("_", " ")
+    path = _resolve_folder_path(folder_name)
+    if not path or not path.exists():
+        return f"I couldn't find {label}."
+
+    open_path(str(path))
+    return f"Opening {label}"
+
+
+def open_file(file_query):
+    global last_app
+
+    if not file_query:
+        return "Which file should I open?"
+
+    result = open_matching_file(str(file_query), workspace=Path.cwd())
+    status = result["status"]
+
+    if status == "opened":
+        match = result["match"]
+        last_app = str(match["path"])
+        return f"Opening {match['name']}"
+
+    if status == "multiple":
+        names = ", ".join(match["name"] for match in result["matches"])
+        return f"I found multiple matching files: {names}. Please be more specific."
+
+    return f"I couldn't find a file matching {file_query}."
+
+
+def _resolve_folder_path(folder_name):
+    folder_name = folder_name.lower()
+
+    if folder_name in CUSTOM_FOLDER_ALIASES:
+        return Path(CUSTOM_FOLDER_ALIASES[folder_name])
+
+    home = Path.home()
+    user_profile = Path(os.environ.get("USERPROFILE", home))
+    one_drive = os.environ.get("OneDrive")
+
+    candidates = {
+        "downloads": [
+            home / "Downloads",
+            user_profile / "Downloads",
+        ],
+        "documents": [
+            home / "Documents",
+            user_profile / "Documents",
+        ],
+        "desktop": [
+            home / "Desktop",
+            user_profile / "Desktop",
+        ],
+        "pictures": [
+            home / "Pictures",
+            user_profile / "Pictures",
+        ],
+    }
+
+    if one_drive:
+        one_drive_path = Path(one_drive)
+        candidates["documents"].append(one_drive_path / "Documents")
+        candidates["desktop"].append(one_drive_path / "Desktop")
+        candidates["pictures"].append(one_drive_path / "Pictures")
+
+    for candidate in candidates.get(folder_name, []):
+        if candidate.exists():
+            return candidate
+
+    return None

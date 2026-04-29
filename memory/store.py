@@ -10,6 +10,7 @@ DEFAULT_MEMORY = {
     "preferences": {},
     "state": {
         "mode": "normal",
+        "llm_provider": "ollama",
         "last_app": None,
         "last_intent": None,
         "last_action": None,
@@ -56,7 +57,15 @@ def remember_event(user_text, decision, response=None):
     memory["state"]["last_intent"] = decision.intent
     memory["state"]["last_action"] = decision.action
 
-    if decision.target and decision.action in {"open_app", "close_app", "open_site", "search_web", "search_youtube"}:
+    if decision.target and decision.action in {
+        "open_app",
+        "open_file",
+        "open_folder",
+        "close_app",
+        "open_site",
+        "search_web",
+        "search_youtube",
+    }:
         memory["state"]["last_app"] = decision.target
 
     if isinstance(decision.query, str) and decision.query:
@@ -71,6 +80,21 @@ def remember_state(key, value):
     save_memory(memory)
 
 
+def get_llm_provider():
+    provider = load_memory()["state"].get("llm_provider", "ollama")
+    if provider not in {"ollama", "api"}:
+        return "ollama"
+    return provider
+
+
+def set_llm_provider(provider):
+    provider = str(provider).strip().lower()
+    if provider not in {"ollama", "api"}:
+        provider = "ollama"
+    remember_state("llm_provider", provider)
+    return provider
+
+
 def remember_preference(key, value):
     memory = load_memory()
     memory["preferences"][key] = value
@@ -82,6 +106,7 @@ def get_context_summary(max_events=5):
     recent = memory["events"][-max_events:]
     lines = [
         f"Mode: {memory['state'].get('mode', 'normal')}",
+        f"LLM provider: {memory['state'].get('llm_provider', 'ollama')}",
         f"Last app: {memory['state'].get('last_app') or 'none'}",
     ]
 

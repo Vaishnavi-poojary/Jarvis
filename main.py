@@ -5,6 +5,7 @@ from voice.listener import listen
 from voice.speaker import speak
 
 from ai.ai_engine import get_ai_response
+from ai.quick_responses import get_quick_response, make_quick_decision
 from brain.planner import plan
 from executor.executor import execute_plan
 from memory.store import get_context_summary, remember_event
@@ -19,15 +20,20 @@ def run_jarvis():
         if command:
             print("You said:", command)
 
-            decision = plan(command)
-            print("Decision:", decision)
-
-            if decision.route in {"action", "ask", "multi"}:
-                response = execute_plan(decision)
-            elif decision.response:
-                response = decision.response
+            quick_response = get_quick_response(command)
+            if quick_response:
+                decision = make_quick_decision(quick_response, command)
+                response = quick_response
             else:
-                response = get_ai_response(command, context=get_context_summary())
+                decision = plan(command)
+                if decision.route in {"action", "ask", "multi"}:
+                    response = execute_plan(decision)
+                elif decision.response:
+                    response = decision.response
+                else:
+                    response = get_ai_response(command, context=get_context_summary())
+
+            print("Decision:", decision)
 
             remember_event(command, decision, response)
 

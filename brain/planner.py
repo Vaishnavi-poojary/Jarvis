@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import requests
 
 from ai.router import choose_model
-from memory.store import load_memory, remember_preference, remember_state
+from memory.store import load_memory, remember_preference, set_llm_provider, remember_state
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -16,6 +16,8 @@ VALID_ACTIONS = {
     "ask_followup",
     "close_app",
     "open_app",
+    "open_file",
+    "open_folder",
     "open_site",
     "remember_preference",
     "remember_state",
@@ -28,13 +30,15 @@ VALID_INTENTS = {
     "missing_input",
     "multi_step",
     "open_app",
+    "open_file",
+    "open_folder",
     "open_site",
     "play_media",
     "remember_preference",
     "search_web",
     "set_mode",
 }
-
+  
 
 @dataclass
 class Decision:
@@ -63,10 +67,29 @@ SITE_ALIASES = {
     "github": "github",
     "stack overflow": "stackoverflow",
     "stackoverflow": "stackoverflow",
+    "chatgpt": "chatgpt",
+    "netflix": "netflix",
+    "linkedin": "linkedin",
+    "gmail": "gmail",
+    "spotify": "spotify",
+    "whatsapp": "whatsapp"
+}
+
+FOLDER_ALIASES = {
+    "desktop": "desktop",
+    "documents": "documents",
+    "downloads": "downloads",
+    "download": "downloads",
+    "pictures": "pictures",
+    "photos": "pictures",
+    "project folder": "project_folder",
+    "workspace": "project_folder",
 }
 
 BUSY_PHRASES = {"i am busy", "i'm busy", "im busy", "busy now", "do not disturb"}
 NORMAL_PHRASES = {"i am free", "i'm free", "im free", "normal mode", "you can talk"}
+API_PROVIDER_PHRASES = {"switch to api mode", "use api"}
+OLLAMA_PROVIDER_PHRASES = {"switch to ollama mode", "use ollama"}
 MEDIA_VERBS = {"watch", "play"}
 YOUTUBE_FILLER_PHRASES = (
     "i want to watch",
@@ -120,6 +143,19 @@ def plan(command: str) -> Decision:
             action="remember_state",
             target="normal",
             response="Normal mode restored.",
+            confidence=0.95,
+        )
+
+    provider = _extract_provider_switch(text)
+    if provider:
+        set_llm_provider(provider)
+        label = "API" if provider == "api" else "Ollama"
+        return Decision(
+            route="chat",
+            intent="set_mode",
+            action="remember_state",
+            target=provider,
+            response=f"{label} mode enabled.",
             confidence=0.95,
         )
 
@@ -227,13 +263,33 @@ def plan(command: str) -> Decision:
             confidence=0.85,
         )
 
+    folder = _find_folder(text)
+    if folder and _is_open_command(text):
+        return Decision(
+            route="action",
+            intent="open_folder",
+            action="open_folder",
+            target=folder,
+            confidence=0.9,
+        )
+
     app = _find_app(text)
-    if app and ("open" in text or "start" in text or "launch" in text):
+    if app and _is_app_open_command(text):
         return Decision(
             route="action",
             intent="open_app",
             action="open_app",
             target=app,
+            confidence=0.85,
+        )
+
+    file_query = _extract_open_file_query(text)
+    if file_query:
+        return Decision(
+            route="action",
+            intent="open_file",
+            action="open_file",
+            query=file_query,
             confidence=0.85,
         )
 
@@ -318,7 +374,7 @@ You are a command planner for Jarvis. Return only one compact JSON object.
 Do not include markdown, commentary, or extra keys.
 
 Allowed routes: action, ask, chat
-Allowed actions: ask_followup, close_app, open_app, open_site, search_web, search_youtube, null
+Allowed actions: ask_followup, close_app, open_app, open_file, open_folder, open_site, search_web, search_youtube, null
 Allowed targets: notepad, calculator, chrome, youtube, google, github, stackoverflow, or null
 
 Use action when the user clearly wants Jarvis to do something.
@@ -415,12 +471,59 @@ def _find_site(text: str):
     return None
 
 
+def _find_folder(text: str):
+    for alias, folder in FOLDER_ALIASES.items():
+        if _has_word_or_phrase(text, alias):
+            return folder
+    return None
+
+
+def _is_open_command(text: str) -> bool:
+    text = _strip_polite_prefix(text)
+    return text.startswith("open ")
+
+
+def _is_app_open_command(text: str) -> bool:
+    text = _strip_polite_prefix(text)
+    if not text.startswith(("open ", "start ", "launch ")):
+        return False
+
+    target = re.sub(r"^(open|start|launch)\s+", "", text).strip()
+    target = re.sub(r"^(the|my)\s+", "", target).strip()
+    return target in APP_ALIASES or target == "google chrome"
+
+
+def _extract_open_file_query(text: str) -> str | None:
+    text = _strip_polite_prefix(text)
+    if not _is_open_command(text):
+        return None
+
+    query = text.removeprefix("open ").strip()
+    query = re.sub(r"^(the|my)\s+", "", query).strip()
+    if not query:
+        return None
+
+    return query
+
+
+def _strip_polite_prefix(text: str) -> str:
+    return re.sub(r"^(please|can you|could you)\s+", "", text).strip()
+
+
 def _is_close_command(text: str) -> bool:
     return any(_has_word_or_phrase(text, word) for word in ("close", "exit", "quit", "stop"))
 
 
 def _is_search_command(text: str) -> bool:
     return _has_word_or_phrase(text, "search") or text.startswith("google ") or "look up" in text
+
+
+def _extract_provider_switch(text: str) -> str | None:
+    if text in API_PROVIDER_PHRASES:
+        return "api"
+    if text in OLLAMA_PROVIDER_PHRASES:
+        return "ollama"
+    return None
 
 
 def _extract_search_query(text: str) -> str:
